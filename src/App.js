@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 
 const STORAGE_KEY = "lambda_chat_config";
 
@@ -16,6 +16,20 @@ function saveConfig(cfg) {
 
 function generateId() {
   return Math.random().toString(36).slice(2, 10);
+}
+
+function formatSize(bytes) {
+  if (bytes < 1024) return `${bytes}B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)}KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)}MB`;
+}
+
+function fileIcon(mimeType) {
+  if (mimeType.startsWith("image/")) return "◈";
+  if (mimeType === "application/pdf") return "▤";
+  if (mimeType.startsWith("text/")) return "≡";
+  if (mimeType.includes("json")) return "{}";
+  return "◻";
 }
 
 const styles = {
@@ -178,8 +192,71 @@ const styles = {
     borderTop: "1px solid #1a2a3a",
     background: "#060a0e",
     display: "flex",
+    flexDirection: "column",
+    gap: "8px",
+  },
+  inputRow: {
+    display: "flex",
     gap: "10px",
     alignItems: "flex-end",
+  },
+  attachBar: {
+    display: "flex",
+    gap: "6px",
+    flexWrap: "wrap",
+  },
+  attachChip: {
+    display: "flex",
+    alignItems: "center",
+    gap: "5px",
+    background: "#0a1a28",
+    border: "1px solid #1a3a5a",
+    borderRadius: "5px",
+    padding: "3px 8px",
+    fontSize: "11px",
+    color: "#4a8aaa",
+    letterSpacing: "0.04em",
+  },
+  attachChipRemove: {
+    background: "transparent",
+    border: "none",
+    color: "#2a5a7a",
+    cursor: "pointer",
+    padding: "0 0 0 2px",
+    fontSize: "13px",
+    lineHeight: 1,
+  },
+  uploadBtn: {
+    background: "transparent",
+    border: "1px solid #1a2a3a",
+    borderRadius: "8px",
+    color: "#3a6a7a",
+    cursor: "pointer",
+    padding: "10px 12px",
+    fontSize: "14px",
+    transition: "all 0.15s",
+    flexShrink: 0,
+    height: "44px",
+    display: "flex",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  attachInBubble: {
+    marginTop: "8px",
+    display: "flex",
+    flexDirection: "column",
+    gap: "4px",
+  },
+  attachInBubbleItem: {
+    display: "flex",
+    alignItems: "center",
+    gap: "6px",
+    fontSize: "11px",
+    color: "#4a7a9a",
+    background: "#0a1a28",
+    border: "1px solid #1a3050",
+    borderRadius: "4px",
+    padding: "3px 8px",
   },
   textarea: {
     flex: 1,
@@ -300,7 +377,56 @@ const styles = {
     color: "#3a5a6a",
     lineHeight: "1.7",
   },
+  ec2Widget: {
+    display: "flex",
+    alignItems: "center",
+    gap: "8px",
+    background: "#0a1218",
+    border: "1px solid #1a2a3a",
+    borderRadius: "6px",
+    padding: "4px 10px 4px 8px",
+  },
+  ec2Label: {
+    fontSize: "9px",
+    letterSpacing: "0.14em",
+    textTransform: "uppercase",
+    color: "#2a4a5a",
+  },
+  ec2StatusText: (status) => ({
+    fontSize: "10px",
+    letterSpacing: "0.1em",
+    fontFamily: "monospace",
+    color: status === "running"  ? "#4dd9ac"
+         : status === "stopped"  ? "#e24b4a"
+         : "#c8a838",
+  }),
+  toggleTrack: (on, disabled) => ({
+    position: "relative",
+    width: "32px",
+    height: "16px",
+    borderRadius: "8px",
+    background: on ? "#0d4a30" : "#1a1a2a",
+    border: `1px solid ${on ? "#2a7a5a" : "#2a2a4a"}`,
+    cursor: disabled ? "not-allowed" : "pointer",
+    transition: "all 0.2s",
+    flexShrink: 0,
+    opacity: disabled ? 0.5 : 1,
+  }),
+  toggleThumb: (on) => ({
+    position: "absolute",
+    top: "2px",
+    left: on ? "16px" : "2px",
+    width: "10px",
+    height: "10px",
+    borderRadius: "50%",
+    background: on ? "#4dd9ac" : "#4a4a6a",
+    boxShadow: on ? "0 0 5px #4dd9ac88" : "none",
+    transition: "left 0.2s, background 0.2s",
+  }),
 };
+
+const EC2_POWER_URL = "https://wytyp8br3h.execute-api.us-east-2.amazonaws.com/default/ec2-power-manager";
+const TRANSITIONAL = new Set(["pending", "stopping", "rebooting"]);
 
 export default function App() {
   const cfg = loadConfig();
@@ -313,8 +439,105 @@ export default function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const [online, setOnline] = useState(!!cfg.apiUrl);
+  const [attachments, setAttachments] = useState([]);
+  const [ec2Status, setEc2Status] = useState("unknown");
+  const [ec2ActionLoading, setEc2ActionLoading] = useState(false);
+  const [ec2Feedback, setEc2Feedback] = useState("");
   const bottomRef = useRef(null);
   const textareaRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const pollRef = useRef(null);
+
+  const fetchEc2Status = useCallback(async () => {
+    try {
+      const res = await fetch(EC2_POWER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "status" }),
+      });
+      const data = await res.json();
+      const status = data.status || data.state || "unknown";
+      setEc2Status(status);
+      return status;
+    } catch {
+      setEc2Status("unknown");
+      return "unknown";
+    }
+  }, []);
+
+  // Fetch status on mount, then poll while in a transitional state
+  useEffect(() => {
+    fetchEc2Status();
+  }, [fetchEc2Status]);
+
+  useEffect(() => {
+    clearInterval(pollRef.current);
+    if (TRANSITIONAL.has(ec2Status)) {
+      pollRef.current = setInterval(async () => {
+        const s = await fetchEc2Status();
+        if (!TRANSITIONAL.has(s)) {
+          clearInterval(pollRef.current);
+          setEc2ActionLoading(false);
+          setEc2Feedback(s === "running" ? "Instance running" : "Instance stopped");
+          setTimeout(() => setEc2Feedback(""), 3000);
+        }
+      }, 5000);
+    }
+    return () => clearInterval(pollRef.current);
+  }, [ec2Status, fetchEc2Status]);
+
+  async function handleEc2Toggle() {
+    if (ec2ActionLoading || TRANSITIONAL.has(ec2Status)) return;
+    const action = ec2Status === "running" ? "stop" : "start";
+    setEc2ActionLoading(true);
+    setEc2Feedback(action === "start" ? "Starting..." : "Stopping...");
+    try {
+      const res = await fetch(EC2_POWER_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      const data = await res.json();
+      const status = data.status || data.state || (action === "start" ? "pending" : "stopping");
+      setEc2Status(status);
+      if (!TRANSITIONAL.has(status)) {
+        setEc2ActionLoading(false);
+        setEc2Feedback(status === "running" ? "Instance running" : "Instance stopped");
+        setTimeout(() => setEc2Feedback(""), 3000);
+      }
+    } catch (err) {
+      setEc2ActionLoading(false);
+      setEc2Feedback("Error: " + (err.message || "request failed"));
+      setTimeout(() => setEc2Feedback(""), 4000);
+    }
+  }
+
+  const readFileAsBase64 = useCallback((file) =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result.split(",")[1]);
+      reader.onerror = reject;
+      reader.readAsDataURL(file);
+    }), []);
+
+  async function handleFileChange(e) {
+    const files = Array.from(e.target.files || []);
+    if (!files.length) return;
+    const encoded = await Promise.all(
+      files.map(async (f) => ({
+        name: f.name,
+        type: f.type || "application/octet-stream",
+        size: f.size,
+        data: await readFileAsBase64(f),
+      }))
+    );
+    setAttachments(prev => [...prev, ...encoded]);
+    e.target.value = "";
+  }
+
+  function removeAttachment(idx) {
+    setAttachments(prev => prev.filter((_, i) => i !== idx));
+  }
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
@@ -336,23 +559,32 @@ export default function App() {
 
   async function handleSend() {
     const prompt = input.trim();
-    if (!prompt || loading) return;
+    if ((!prompt && attachments.length === 0) || loading) return;
     if (!apiUrl) { setError("Set your Lambda URL in settings first."); return; }
 
+    const pendingAttachments = [...attachments];
     setInput("");
+    setAttachments([]);
     setError("");
-    setMessages(m => [...m, { role: "user", content: prompt, id: generateId() }]);
+    setMessages(m => [...m, {
+      role: "user",
+      content: prompt,
+      attachments: pendingAttachments.map(a => ({ name: a.name, type: a.type, size: a.size })),
+      id: generateId(),
+    }]);
     setLoading(true);
 
     try {
+      const body = {
+        session_id: sessionId,
+        prompt,
+        max_tokens: parseInt(maxTokens) || 200,
+        ...(pendingAttachments.length > 0 && { attachments: pendingAttachments }),
+      };
       const res = await fetch(apiUrl, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          session_id: sessionId,
-          prompt,
-          max_tokens: parseInt(maxTokens) || 200,
-        }),
+        body: JSON.stringify(body),
       });
 
       const data = await res.json();
@@ -361,8 +593,8 @@ export default function App() {
         throw new Error(data.error || `HTTP ${res.status}`);
       }
 
-      const body = typeof data.body === "string" ? JSON.parse(data.body) : data;
-      const reply = body.response || body.message || JSON.stringify(body);
+      const parsed = typeof data.body === "string" ? JSON.parse(data.body) : data;
+      const reply = parsed.response || parsed.message || JSON.stringify(parsed);
 
       setMessages(m => [...m, { role: "assistant", content: reply, id: generateId() }]);
     } catch (err) {
@@ -385,7 +617,7 @@ export default function App() {
     }
   }
 
-  const canSend = !!input.trim() && !loading && !!apiUrl;
+  const canSend = (!!input.trim() || attachments.length > 0) && !loading && !!apiUrl;
 
   return (
     <div style={styles.root}>
@@ -393,6 +625,10 @@ export default function App() {
         @keyframes pulse {
           0%, 100% { opacity: 0.3; transform: scale(0.8); }
           50% { opacity: 1; transform: scale(1.1); }
+        }
+        @keyframes blink {
+          0%, 100% { opacity: 1; }
+          50% { opacity: 0.3; }
         }
         ::-webkit-scrollbar { width: 4px; }
         ::-webkit-scrollbar-track { background: transparent; }
@@ -415,6 +651,36 @@ export default function App() {
           <span style={styles.statusDot(online)}></span>
           <span style={styles.statusText}>{online ? "CONNECTED" : "NOT CONFIGURED"}</span>
         </div>
+
+        {/* EC2 power widget */}
+        <div style={styles.ec2Widget}>
+          <span style={styles.ec2Label}>EC2</span>
+          <span style={styles.ec2StatusText(ec2Status)}>
+            {ec2Feedback || (
+              TRANSITIONAL.has(ec2Status)
+                ? ec2Status.toUpperCase() + "…"
+                : ec2Status.toUpperCase()
+            )}
+          </span>
+          <div
+            style={styles.toggleTrack(
+              ec2Status === "running",
+              ec2ActionLoading || TRANSITIONAL.has(ec2Status)
+            )}
+            onClick={handleEc2Toggle}
+            title={ec2Status === "running" ? "Stop instance" : "Start instance"}
+          >
+            <div style={styles.toggleThumb(ec2Status === "running")} />
+          </div>
+          <button
+            style={{ ...styles.iconBtn, padding: "3px 7px", fontSize: "10px" }}
+            onClick={fetchEc2Status}
+            title="Refresh EC2 status"
+          >
+            ↻
+          </button>
+        </div>
+
         <div style={styles.topBarRight}>
           <span style={styles.sessionLabel}>SID: {sessionId}</span>
           <button
@@ -457,6 +723,19 @@ export default function App() {
                   ...(msg.isError ? { color: "#e24b4a", borderColor: "#3a1818", background: "#1a0808" } : {}),
                 }}>
                   {msg.content}
+                  {msg.attachments?.length > 0 && (
+                    <div style={styles.attachInBubble}>
+                      {msg.attachments.map((a, i) => (
+                        <div key={i} style={styles.attachInBubbleItem}>
+                          <span>{fileIcon(a.type)}</span>
+                          <span>{a.name}</span>
+                          <span style={{ marginLeft: "auto", color: "#2a5a6a", fontSize: "10px" }}>
+                            {formatSize(a.size)}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
@@ -476,27 +755,56 @@ export default function App() {
 
           {/* Input */}
           <div style={styles.inputArea}>
-            <textarea
-              ref={textareaRef}
-              style={styles.textarea}
-              placeholder="Enter prompt... (Shift+Enter for newline)"
-              value={input}
-              onChange={e => setInput(e.target.value)}
-              onKeyDown={handleKey}
-              rows={1}
-              disabled={loading}
-              onInput={e => {
-                e.target.style.height = "auto";
-                e.target.style.height = Math.min(e.target.scrollHeight, 160) + "px";
-              }}
-            />
-            <button
-              style={styles.sendBtn(canSend)}
-              onClick={handleSend}
-              disabled={!canSend}
-            >
-              SEND →
-            </button>
+            {attachments.length > 0 && (
+              <div style={styles.attachBar}>
+                {attachments.map((a, i) => (
+                  <div key={i} style={styles.attachChip}>
+                    <span>{fileIcon(a.type)}</span>
+                    <span>{a.name}</span>
+                    <span style={{ color: "#2a5a6a", fontSize: "10px" }}>{formatSize(a.size)}</span>
+                    <button style={styles.attachChipRemove} onClick={() => removeAttachment(i)}>×</button>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={styles.inputRow}>
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                style={{ display: "none" }}
+                onChange={handleFileChange}
+              />
+              <button
+                style={styles.uploadBtn}
+                onClick={() => fileInputRef.current?.click()}
+                disabled={loading}
+                title="Attach files"
+              >
+                ⊕
+              </button>
+              <textarea
+                ref={textareaRef}
+                style={styles.textarea}
+                placeholder="Enter prompt... (Shift+Enter for newline)"
+                value={input}
+                onChange={e => setInput(e.target.value)}
+                onKeyDown={handleKey}
+                rows={1}
+                disabled={loading}
+                onInput={e => {
+                  e.target.style.height = "auto";
+                  e.target.style.height = Math.min(e.target.scrollHeight, 160) + "px";
+                }}
+              />
+              <button
+                style={styles.sendBtn(canSend)}
+                onClick={handleSend}
+                disabled={!canSend}
+              >
+                SEND →
+              </button>
+            </div>
           </div>
         </div>
 
